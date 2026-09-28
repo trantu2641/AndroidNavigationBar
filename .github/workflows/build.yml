@@ -1,51 +1,145 @@
-name: Build Android Navigation Bar RootHide
+name: Build Android Navigation Bar V1.3 SAFE
 
 on:
   workflow_dispatch:
 
+  push:
     branches:
       - main
     paths:
       - "Makefile"
       - "control"
-      - "Tweak.xm"
+      - "AppBar.xm"
+      - "SpringBoardBridge.xm"
       - "AndroidNavigationBar.plist"
+      - "ANBSpringBoardBridge.plist"
       - ".github/workflows/build.yml"
 
 permissions:
   contents: read
 
 jobs:
-
   build:
-
+    name: Build RootHide arm64e
     runs-on: macos-14
 
     steps:
 
-      - name: Checkout
+      # ============================================================
+      # CHECKOUT
+      # ============================================================
+
+      - name: Checkout repository
         uses: actions/checkout@v4
 
 
-      - name: Install dependencies
+      # ============================================================
+      # DEPENDENCIES
+      # ============================================================
+
+      - name: Install build dependencies
+        shell: bash
         run: |
           set -e
 
-          brew update
+          echo "======================================"
+          echo "INSTALL BUILD DEPENDENCIES"
+          echo "======================================"
 
-          brew install \
-            ldid \
-            make \
-            xz \
-            dpkg
+          brew install ldid make xz
 
-          echo "$(brew --prefix make)/libexec/gnubin" \
-            >> "$GITHUB_PATH"
+          MAKE_PREFIX="$(brew --prefix make)"
 
+          echo "$MAKE_PREFIX/libexec/gnubin" >> "$GITHUB_PATH"
+
+          export PATH="$MAKE_PREFIX/libexec/gnubin:$PATH"
+
+          echo
+          echo "make:"
+          which make
+          make --version
+
+          echo
+          echo "ldid:"
+          which ldid
+          ldid -h || true
+
+          echo
+          echo "xz:"
+          which xz
+          xz --version
+
+
+      # ============================================================
+      # DPKG
+      # ============================================================
+
+      - name: Install dpkg tools
+        shell: bash
+        run: |
+          set -e
+
+          echo "======================================"
+          echo "CHECK DPKG"
+          echo "======================================"
+
+          if command -v dpkg-deb >/dev/null 2>&1; then
+
+            echo "dpkg-deb already installed:"
+            which dpkg-deb
+
+          else
+
+            echo "dpkg-deb not found."
+            echo "Trying Homebrew dpkg..."
+
+            set +e
+
+            brew install dpkg
+
+            BREW_STATUS=$?
+
+            set -e
+
+            echo
+            echo "brew dpkg exit status: $BREW_STATUS"
+
+            echo
+            echo "Checking again..."
+
+            if command -v dpkg-deb >/dev/null 2>&1; then
+
+              echo "dpkg-deb installed successfully:"
+              which dpkg-deb
+
+            else
+
+              echo "ERROR:"
+              echo "dpkg-deb is still unavailable."
+              echo "Homebrew exit status: $BREW_STATUS"
+
+              exit 1
+            fi
+
+          fi
+
+          echo
+          echo "dpkg-deb version:"
+          dpkg-deb --version
+
+
+      # ============================================================
+      # ROOT HIDE THEOS
+      # ============================================================
 
       - name: Install RootHide Theos
+        shell: bash
         run: |
           set -e
+
+          echo "======================================"
+          echo "INSTALL ROOTHIDE THEOS"
+          echo "======================================"
 
           rm -rf "$GITHUB_WORKSPACE/theos"
 
@@ -55,13 +149,25 @@ jobs:
             https://github.com/roothide/theos.git \
             "$GITHUB_WORKSPACE/theos"
 
-          echo "THEOS=$GITHUB_WORKSPACE/theos" \
-            >> "$GITHUB_ENV"
+          echo "THEOS=$GITHUB_WORKSPACE/theos" >> "$GITHUB_ENV"
+
+          echo
+          echo "Theos installed:"
+          ls -la "$GITHUB_WORKSPACE/theos"
 
 
-      - name: Install iOS 16.5 SDK
+      # ============================================================
+      # IOS SDK 16.5
+      # ============================================================
+
+      - name: Install patched iOS 16.5 SDK
+        shell: bash
         run: |
           set -e
+
+          echo "======================================"
+          echo "INSTALL IOS 16.5 SDK"
+          echo "======================================"
 
           mkdir -p "$THEOS/sdks"
 
@@ -86,10 +192,104 @@ jobs:
             iPhoneOS16.5.sdk \
             "$THEOS/sdks/iPhoneOS16.5.sdk"
 
+          echo
+          echo "Installed SDK:"
+          ls -ld \
+            "$THEOS/sdks/iPhoneOS16.5.sdk"
 
-      - name: Clean
+
+      # ============================================================
+      # VERIFY ENVIRONMENT
+      # ============================================================
+
+      - name: Verify build environment
+        shell: bash
         run: |
           set -e
+
+          echo "======================================"
+          echo "BUILD ENVIRONMENT"
+          echo "======================================"
+
+          echo "THEOS=$THEOS"
+
+          echo
+          echo "SDKs:"
+          find "$THEOS/sdks" \
+            -maxdepth 1 \
+            -type d \
+            -name "*.sdk" \
+            -print
+
+          echo
+          echo "clang:"
+          clang --version
+
+          echo
+          echo "make:"
+          which make
+          make --version
+
+          echo
+          echo "ldid:"
+          which ldid
+
+          echo
+          echo "dpkg-deb:"
+          which dpkg-deb
+          dpkg-deb --version
+
+
+      # ============================================================
+      # PROJECT FILE CHECK
+      # ============================================================
+
+      - name: Verify project files
+        shell: bash
+        run: |
+          set -e
+
+          echo "======================================"
+          echo "VERIFY PROJECT FILES"
+          echo "======================================"
+
+          REQUIRED_FILES=(
+            "Makefile"
+            "control"
+            "AppBar.xm"
+            "SpringBoardBridge.xm"
+            "AndroidNavigationBar.plist"
+            "ANBSpringBoardBridge.plist"
+          )
+
+          for FILE in "${REQUIRED_FILES[@]}"; do
+
+            if [ ! -f "$FILE" ]; then
+
+              echo "ERROR: Missing file:"
+              echo "$FILE"
+
+              exit 1
+
+            fi
+
+            echo "OK: $FILE"
+
+          done
+
+
+      # ============================================================
+      # CLEAN
+      # ============================================================
+
+      - name: Clean previous build
+        shell: bash
+        run: |
+          set -e
+
+          echo "======================================"
+          echo "CLEAN"
+          echo "======================================"
 
           rm -rf packages
           rm -rf .theos
@@ -97,9 +297,18 @@ jobs:
           make clean
 
 
-      - name: Build
+      # ============================================================
+      # BUILD
+      # ============================================================
+
+      - name: Build RootHide arm64e package
+        shell: bash
         run: |
           set -e
+
+          echo "======================================"
+          echo "BUILD"
+          echo "======================================"
 
           make \
             package \
@@ -108,22 +317,165 @@ jobs:
             THEOS_PACKAGE_SCHEME=roothide
 
 
-      - name: Show package
+      # ============================================================
+      # FIND DEB
+      # ============================================================
+
+      - name: Find generated DEB
+        shell: bash
         run: |
           set -e
+
+          echo "======================================"
+          echo "GENERATED DEB"
+          echo "======================================"
 
           find packages \
             -type f \
             -name "*.deb" \
             -print
 
+          if ! compgen -G "packages/*.deb" > /dev/null; then
+
+            echo
+            echo "ERROR:"
+            echo "No DEB package generated."
+
+            exit 1
+          fi
+
+          echo
+          echo "Package size:"
+
           ls -lh packages/*.deb
 
 
-      - name: Upload DEB
+      # ============================================================
+      # VERIFY DEB CONTENT
+      # ============================================================
+
+      - name: Verify RootHide package contents
+        shell: bash
+        run: |
+          set -e
+
+          DEB="$(find packages \
+            -type f \
+            -name '*.deb' \
+            | head -1)"
+
+          echo "======================================"
+          echo "VERIFY PACKAGE"
+          echo "======================================"
+
+          echo "DEB:"
+          echo "$DEB"
+
+          echo
+          echo "Package content:"
+          echo
+
+          dpkg-deb \
+            -c "$DEB" \
+            | tee /tmp/anb-package.txt
+
+          echo
+          echo "======================================"
+          echo "CHECK APP TWEAK"
+          echo "======================================"
+
+          if ! grep -q \
+            "AndroidNavigationBar.dylib" \
+            /tmp/anb-package.txt; then
+
+            echo "ERROR:"
+            echo "AndroidNavigationBar.dylib missing"
+
+            exit 1
+          fi
+
+          echo "AndroidNavigationBar.dylib OK"
+
+
+          echo
+          echo "======================================"
+          echo "CHECK SPRINGBOARD BRIDGE"
+          echo "======================================"
+
+          if ! grep -q \
+            "ANBSpringBoardBridge.dylib" \
+            /tmp/anb-package.txt; then
+
+            echo "ERROR:"
+            echo "ANBSpringBoardBridge.dylib missing"
+
+            exit 1
+          fi
+
+          echo "ANBSpringBoardBridge.dylib OK"
+
+
+          echo
+          echo "======================================"
+          echo "CHECK FILTERS"
+          echo "======================================"
+
+          if ! grep -q \
+            "AndroidNavigationBar.plist" \
+            /tmp/anb-package.txt; then
+
+            echo "ERROR:"
+            echo "AndroidNavigationBar.plist missing"
+
+            exit 1
+          fi
+
+          echo "AndroidNavigationBar.plist OK"
+
+
+          if ! grep -q \
+            "ANBSpringBoardBridge.plist" \
+            /tmp/anb-package.txt; then
+
+            echo "ERROR:"
+            echo "ANBSpringBoardBridge.plist missing"
+
+            exit 1
+          fi
+
+          echo "ANBSpringBoardBridge.plist OK"
+
+
+      # ============================================================
+      # PACKAGE INFO
+      # ============================================================
+
+      - name: Show package information
+        shell: bash
+        run: |
+          set -e
+
+          DEB="$(find packages \
+            -type f \
+            -name '*.deb' \
+            | head -1)"
+
+          echo "======================================"
+          echo "PACKAGE INFO"
+          echo "======================================"
+
+          dpkg-deb \
+            -I "$DEB"
+
+
+      # ============================================================
+      # UPLOAD
+      # ============================================================
+
+      - name: Upload RootHide DEB
         uses: actions/upload-artifact@v4
         with:
-          name: AndroidNavigationBar-RootHide-arm64e
+          name: AndroidNavigationBar-V1.3-SAFE-RootHide-arm64e
           path: packages/*.deb
           if-no-files-found: error
           compression-level: 0
