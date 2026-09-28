@@ -9,14 +9,22 @@ DEBUG = 0
 
 include $(THEOS)/makefiles/common.mk
 
-TWEAK_NAME = AndroidNavigationBar
+TWEAK_NAME = AndroidNavigationBar ANBSpringBoardBridge
 
-AndroidNavigationBar_FILES = Tweak.xm
+
+AndroidNavigationBar_FILES = AppBar.xm
 AndroidNavigationBar_CFLAGS = -fobjc-arc
-
 AndroidNavigationBar_FRAMEWORKS = \
 	UIKit \
 	WebKit \
 	QuartzCore
+
+
+ANBSpringBoardBridge_FILES = SpringBoardBridge.xm
+ANBSpringBoardBridge_CFLAGS = -fobjc-arc
+ANBSpringBoardBridge_FRAMEWORKS = \
+	UIKit \
+	Foundation
+
 
 include $(THEOS_MAKE_PATH)/tweak.mk
