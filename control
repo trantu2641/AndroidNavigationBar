@@ -1,0 +1,9 @@
+Package: com.chatgpt.androidnavigationbar
+Name: Android Navigation Bar
+Version: 1.0.0
+Architecture: iphoneos-arm64e
+Description: Android-style Back, Home and Recent Apps navigation buttons for RootHide.
+Maintainer: ChatGPT
+Author: ChatGPT
+Section: Tweaks
+Depends: mobilesubstrate
