@@ -4,20 +4,23 @@
 #import <objc/runtime.h>
 #import <objc/message.h>
 
-#pragma mark - Notifications
+#pragma mark - Darwin Notifications
 
-static CFStringRef const ANBBackNotification =
-    CFSTR("com.chatgpt.androidnavigationbar/back");
+static CFStringRef const ANBHomeNotification =
+    CFSTR("com.chatgpt.androidnavigationbar/home");
 
-#pragma mark - Globals
+static CFStringRef const ANBRecentNotification =
+    CFSTR("com.chatgpt.androidnavigationbar/recent");
 
-static UIWindow *gANBOverlayWindow = nil;
+#pragma mark - Constants
 
 static CGFloat const ANBBarWidth = 210.0;
 static CGFloat const ANBBarHeight = 50.0;
-static CGFloat const ANBBottomMargin = 8.0;
+static CGFloat const ANBBottomGap = 5.0;
 
-#pragma mark - Helpers
+static char kANBBarKey;
+
+#pragma mark - Process Helpers
 
 static NSString *ANBBundleIdentifier(void)
 {
@@ -37,7 +40,187 @@ static BOOL ANBIsSpringBoard(void)
         isEqualToString:@"com.apple.springboard"];
 }
 
-#pragma mark - Visible controller
+#pragma mark - Window Helpers
+
+static BOOL ANBWindowAllowed(
+    UIWindow *window
+)
+{
+    if (!window) {
+        return NO;
+    }
+
+    if (window.hidden) {
+        return NO;
+    }
+
+    if (window.alpha <= 0.01) {
+        return NO;
+    }
+
+    /*
+     Chỉ dùng cửa sổ chính của app.
+
+     Không gắn thanh vào:
+     - bàn phím
+     - alert window
+     - text effects
+     - overlay hệ thống
+    */
+    if (window.windowLevel != UIWindowLevelNormal) {
+        return NO;
+    }
+
+    if (!window.rootViewController) {
+        return NO;
+    }
+
+    NSString *className =
+        NSStringFromClass(window.class);
+
+    NSArray<NSString *> *ignored = @[
+        @"Keyboard",
+        @"TextEffects",
+        @"RemoteKeyboard",
+        @"InputWindow",
+        @"UITextEffects",
+        @"Alert"
+    ];
+
+    for (NSString *word in ignored) {
+
+        if ([className
+                rangeOfString:word
+                options:NSCaseInsensitiveSearch]
+                .location != NSNotFound) {
+
+            return NO;
+        }
+    }
+
+    return YES;
+}
+
+static UIWindow *
+ANBBestWindow(void)
+{
+    UIApplication *application =
+        UIApplication.sharedApplication;
+
+    if (@available(iOS 13.0, *)) {
+
+        /*
+         Ưu tiên scene đang foreground.
+        */
+
+        for (UIScene *scene
+             in application.connectedScenes) {
+
+            if (![scene
+                    isKindOfClass:
+                        [UIWindowScene class]]) {
+
+                continue;
+            }
+
+            if (scene.activationState !=
+                UISceneActivationStateForegroundActive) {
+
+                continue;
+            }
+
+            UIWindowScene *windowScene =
+                (UIWindowScene *)scene;
+
+            /*
+             Key window trước.
+            */
+
+            for (UIWindow *window
+                 in windowScene.windows) {
+
+                if (window.isKeyWindow &&
+                    ANBWindowAllowed(window)) {
+
+                    return window;
+                }
+            }
+
+            /*
+             Nếu không có key window thì lấy
+             normal window lớn nhất.
+            */
+
+            UIWindow *best = nil;
+            CGFloat bestArea = 0.0;
+
+            for (UIWindow *window
+                 in windowScene.windows) {
+
+                if (!ANBWindowAllowed(window)) {
+                    continue;
+                }
+
+                CGFloat area =
+                    CGRectGetWidth(window.bounds) *
+                    CGRectGetHeight(window.bounds);
+
+                if (area > bestArea) {
+
+                    best = window;
+                    bestArea = area;
+                }
+            }
+
+            if (best) {
+                return best;
+            }
+        }
+
+        /*
+         Fallback sang scene khác.
+        */
+
+        for (UIScene *scene
+             in application.connectedScenes) {
+
+            if (![scene
+                    isKindOfClass:
+                        [UIWindowScene class]]) {
+
+                continue;
+            }
+
+            UIWindowScene *windowScene =
+                (UIWindowScene *)scene;
+
+            for (UIWindow *window
+                 in windowScene.windows) {
+
+                if (ANBWindowAllowed(window)) {
+                    return window;
+                }
+            }
+        }
+    }
+
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wdeprecated-declarations"
+
+    for (UIWindow *window
+         in application.windows) {
+
+        if (ANBWindowAllowed(window)) {
+            return window;
+        }
+    }
+
+#pragma clang diagnostic pop
+
+    return nil;
+}
+
+#pragma mark - Visible Controller
 
 static UIViewController *
 ANBVisibleController(
@@ -66,11 +249,8 @@ ANBVisibleController(
         UINavigationController *nav =
             (UINavigationController *)controller;
 
-        UIViewController *visible =
-            nav.visibleViewController;
-
         return ANBVisibleController(
-            visible ?: nav
+            nav.visibleViewController ?: nav
         );
     }
 
@@ -78,14 +258,11 @@ ANBVisibleController(
             isKindOfClass:
                 [UITabBarController class]]) {
 
-        UITabBarController *tab =
+        UITabBarController *tabs =
             (UITabBarController *)controller;
 
-        UIViewController *selected =
-            tab.selectedViewController;
-
         return ANBVisibleController(
-            selected ?: tab
+            tabs.selectedViewController ?: tabs
         );
     }
 
@@ -107,103 +284,11 @@ ANBVisibleController(
     return controller;
 }
 
-static UIWindow *
-ANBActiveWindow(void)
-{
-    UIApplication *application =
-        UIApplication.sharedApplication;
-
-    if (@available(iOS 13.0, *)) {
-
-        for (UIScene *scene
-             in application.connectedScenes) {
-
-            if (scene.activationState !=
-                UISceneActivationStateForegroundActive) {
-
-                continue;
-            }
-
-            if (![scene
-                    isKindOfClass:
-                        [UIWindowScene class]]) {
-
-                continue;
-            }
-
-            UIWindowScene *windowScene =
-                (UIWindowScene *)scene;
-
-            /*
-             Ưu tiên keyWindow.
-            */
-            for (UIWindow *window
-                 in windowScene.windows) {
-
-                if (window == gANBOverlayWindow) {
-                    continue;
-                }
-
-                if (window.isKeyWindow &&
-                    !window.hidden &&
-                    window.alpha > 0.01 &&
-                    window.windowLevel ==
-                        UIWindowLevelNormal) {
-
-                    return window;
-                }
-            }
-
-            /*
-             Fallback.
-            */
-            for (UIWindow *window
-                 in windowScene.windows) {
-
-                if (window == gANBOverlayWindow) {
-                    continue;
-                }
-
-                if (!window.hidden &&
-                    window.alpha > 0.01 &&
-                    window.windowLevel ==
-                        UIWindowLevelNormal) {
-
-                    return window;
-                }
-            }
-        }
-    }
-
-#pragma clang diagnostic push
-#pragma clang diagnostic ignored "-Wdeprecated-declarations"
-
-    for (UIWindow *window
-         in application.windows) {
-
-        if (window == gANBOverlayWindow) {
-            continue;
-        }
-
-        if (!window.hidden &&
-            window.alpha > 0.01 &&
-            window.windowLevel ==
-                UIWindowLevelNormal) {
-
-            return window;
-        }
-    }
-
-#pragma clang diagnostic pop
-
-    return nil;
-}
-
 static UIViewController *
 ANBTopController(void)
 {
     UIWindow *window =
-        ANBActiveWindow();
+        ANBBestWindow();
 
     if (!window) {
         return nil;
@@ -214,21 +299,21 @@ ANBTopController(void)
     );
 }
 
-#pragma mark - Keyboard
+#pragma mark - Keyboard Back
 
 static __weak UIResponder *
 gANBFirstResponder = nil;
 
-@interface UIResponder (ANBResponder)
+@interface UIResponder (ANBFirstResponder)
 
-- (void)anb_captureResponder:
+- (void)anb_captureFirstResponder:
     (id)sender;
 
 @end
 
-@implementation UIResponder (ANBResponder)
+@implementation UIResponder (ANBFirstResponder)
 
-- (void)anb_captureResponder:
+- (void)anb_captureFirstResponder:
     (id)sender
 {
     gANBFirstResponder = self;
@@ -244,7 +329,7 @@ ANBFindFirstResponder(void)
     [UIApplication.sharedApplication
         sendAction:
             @selector(
-                anb_captureResponder:
+                anb_captureFirstResponder:
             )
         to:nil
         from:nil
@@ -300,11 +385,11 @@ ANBFindWebView(
     for (UIView *subview
          in view.subviews) {
 
-        WKWebView *found =
+        WKWebView *result =
             ANBFindWebView(subview);
 
-        if (found) {
-            return found;
+        if (result) {
+            return result;
         }
     }
 
@@ -338,7 +423,7 @@ static BOOL ANBWebBack(void)
     return YES;
 }
 
-#pragma mark - Navigation Controller Search
+#pragma mark - Navigation Controller Back
 
 static UINavigationController *
 ANBFindNavigationController(
@@ -348,6 +433,10 @@ ANBFindNavigationController(
     if (!controller) {
         return nil;
     }
+
+    /*
+     Chính controller là navigation controller.
+    */
 
     if ([controller
             isKindOfClass:
@@ -361,6 +450,10 @@ ANBFindNavigationController(
         }
     }
 
+    /*
+     Controller đang nằm trong một nav.
+    */
+
     UINavigationController *ownNav =
         controller.navigationController;
 
@@ -369,6 +462,10 @@ ANBFindNavigationController(
 
         return ownNav;
     }
+
+    /*
+     Presented controller trước.
+    */
 
     if (controller.presentedViewController) {
 
@@ -381,6 +478,10 @@ ANBFindNavigationController(
             return found;
         }
     }
+
+    /*
+     Custom container.
+    */
 
     for (UIViewController *child
          in controller.childViewControllers) {
@@ -401,7 +502,7 @@ ANBFindNavigationController(
 static BOOL ANBNavigationBack(void)
 {
     UIWindow *window =
-        ANBActiveWindow();
+        ANBBestWindow();
 
     if (!window) {
         return NO;
@@ -420,6 +521,10 @@ static BOOL ANBNavigationBack(void)
         return NO;
     }
 
+    /*
+     Không pop giữa transition.
+    */
+
     id<UIViewControllerTransitionCoordinator>
         coordinator =
             nav.transitionCoordinator;
@@ -430,7 +535,8 @@ static BOOL ANBNavigationBack(void)
         return NO;
     }
 
-    [nav popViewControllerAnimated:YES];
+    [nav
+        popViewControllerAnimated:YES];
 
     return YES;
 }
@@ -473,33 +579,18 @@ static BOOL ANBModalBack(void)
     return YES;
 }
 
-#pragma mark - Accessibility Back
-
-static BOOL ANBAccessibilityBack(void)
-{
-    UIViewController *controller =
-        ANBTopController();
-
-    if (!controller) {
-        return NO;
-    }
-
-    return [controller
-        accessibilityPerformEscape];
-}
-
-#pragma mark - Perform Back
+#pragma mark - App Back
 
 static BOOL ANBPerformBack(void)
 {
     /*
-     Thứ tự giống Android nhất có thể:
+     Android-like order:
 
      1. Đóng bàn phím
-     2. WebView Back
-     3. UINavigationController
-     4. Dismiss modal
-     5. Accessibility fallback
+     2. WebView
+     3. Navigation
+     4. Modal
+     5. Accessibility escape
     */
 
     if (ANBHideKeyboard()) {
@@ -518,63 +609,68 @@ static BOOL ANBPerformBack(void)
         return YES;
     }
 
-    if (ANBAccessibilityBack()) {
-        return YES;
+    UIViewController *controller =
+        ANBTopController();
+
+    if (controller) {
+
+        if ([controller
+                accessibilityPerformEscape]) {
+
+            return YES;
+        }
     }
 
     return NO;
 }
 
-#pragma mark - Back Notification
+#pragma mark - Dynamic Private API Helpers
 
-static void ANBBackNotificationReceived(
-    CFNotificationCenterRef center,
-    void *observer,
-    CFStringRef name,
-    const void *object,
-    CFDictionaryRef userInfo
+static id ANBSharedInstance(
+    NSString *className
 )
 {
-    dispatch_async(
-        dispatch_get_main_queue(),
-        ^{
+    Class cls =
+        NSClassFromString(className);
 
-            /*
-             SpringBoard không xử lý lệnh Back app.
-            */
-            if (ANBIsSpringBoard()) {
-                return;
-            }
+    if (!cls) {
+        return nil;
+    }
 
-            UIApplication *application =
-                UIApplication.sharedApplication;
+    NSArray<NSString *> *selectors = @[
+        @"sharedInstance",
+        @"sharedController",
+        @"sharedSwitcherController"
+    ];
 
-            /*
-             Chỉ app foreground thực sự
-             mới nhận Back.
-            */
-            if (application.applicationState !=
-                UIApplicationStateActive) {
+    for (NSString *name
+         in selectors) {
 
-                return;
-            }
+        SEL selector =
+            NSSelectorFromString(name);
 
-            ANBPerformBack();
+        if ([cls
+                respondsToSelector:
+                    selector]) {
 
+            return
+                ((id (*)(id, SEL))
+                    objc_msgSend)(
+                        (id)cls,
+                        selector
+                    );
         }
-    );
+    }
+
+    return nil;
 }
 
-#pragma mark - Dynamic SpringBoard Helpers
-
-static BOOL ANBSendSelector(
+static BOOL ANBSendVoidSelector(
     id object,
     NSString *selectorName
 )
 {
-    if (!object ||
-        selectorName.length == 0) {
-
+    if (!object) {
         return NO;
     }
 
@@ -590,47 +686,16 @@ static BOOL ANBSendSelector(
         return NO;
     }
 
-    ((void (*)(id, SEL))objc_msgSend)(
-        object,
-        selector
-    );
+    ((void (*)(id, SEL))
+        objc_msgSend)(
+            object,
+            selector
+        );
 
     return YES;
 }
 
-static id ANBSharedInstanceForClass(
-    NSString *className
-)
-{
-    Class cls =
-        NSClassFromString(
-            className
-        );
-
-    if (!cls) {
-        return nil;
-    }
-
-    SEL selector =
-        NSSelectorFromString(
-            @"sharedInstance"
-        );
-
-    if (![cls
-            respondsToSelector:
-                selector]) {
-
-        return nil;
-    }
-
-    return
-        ((id (*)(id, SEL))objc_msgSend)(
-            (id)cls,
-            selector
-        );
-}
-
-#pragma mark - Home
+#pragma mark - Home Action
 
 static void ANBGoHome(void)
 {
@@ -642,438 +707,581 @@ static void ANBGoHome(void)
         UIApplication.sharedApplication;
 
     /*
-     Thử API giả lập Home button trước.
+     Cách 1.
     */
 
-    SEL homeSelector =
+    SEL selector =
         NSSelectorFromString(
             @"_simulateHomeButtonPress"
         );
 
     if ([springBoard
             respondsToSelector:
-                homeSelector]) {
+                selector]) {
 
-        ((void (*)(id, SEL))objc_msgSend)(
-            springBoard,
-            homeSelector
-        );
+        ((void (*)(id, SEL))
+            objc_msgSend)(
+                springBoard,
+                selector
+            );
 
         return;
     }
 
-    SEL homeCompletionSelector =
+    /*
+     Cách 2.
+    */
+
+    selector =
         NSSelectorFromString(
             @"_simulateHomeButtonPressWithCompletion:"
         );
 
     if ([springBoard
             respondsToSelector:
-                homeCompletionSelector]) {
+                selector]) {
 
-        ((void (*)(id, SEL, id))objc_msgSend)(
-            springBoard,
-            homeCompletionSelector,
-            nil
-        );
+        ((void (*)(id, SEL, id))
+            objc_msgSend)(
+                springBoard,
+                selector,
+                nil
+            );
 
         return;
+    }
+
+    /*
+     Cách 3.
+    */
+
+    id uiController =
+        ANBSharedInstance(
+            @"SBUIController"
+        );
+
+    if (ANBSendVoidSelector(
+            uiController,
+            @"clickedMenuButton")) {
+
+        return;
+    }
+
+    ANBSendVoidSelector(
+        uiController,
+        @"handleMenuButtonTap"
+    );
+}
+
+#pragma mark - Recent Apps Action
+
+static void ANBOpenRecentApps(void)
+{
+    if (!ANBIsSpringBoard()) {
+        return;
+    }
+
+    /*
+     iOS mới:
+     dùng SBMainSwitcherViewController trước.
+    */
+
+    id switcher =
+        ANBSharedInstance(
+            @"SBMainSwitcherViewController"
+        );
+
+    if (switcher) {
+
+        SEL selector =
+            NSSelectorFromString(
+                @"toggleSwitcherNoninteractively"
+            );
+
+        if ([switcher
+                respondsToSelector:
+                    selector]) {
+
+            ((void (*)(id, SEL))
+                objc_msgSend)(
+                    switcher,
+                    selector
+                );
+
+            return;
+        }
+
+        selector =
+            NSSelectorFromString(
+                @"toggleSwitcherNoninteractivelyWithSource:"
+            );
+
+        if ([switcher
+                respondsToSelector:
+                    selector]) {
+
+            ((void (*)(id, SEL, NSInteger))
+                objc_msgSend)(
+                    switcher,
+                    selector,
+                    1
+                );
+
+            return;
+        }
+
+        selector =
+            NSSelectorFromString(
+                @"toggleMainSwitcherNoninteractivelyWithSource:animated:"
+            );
+
+        if ([switcher
+                respondsToSelector:
+                    selector]) {
+
+            ((void (*)(id, SEL, NSInteger, BOOL))
+                objc_msgSend)(
+                    switcher,
+                    selector,
+                    1,
+                    YES
+                );
+
+            return;
+        }
     }
 
     /*
      Fallback SBUIController.
     */
 
-    id controller =
-        ANBSharedInstanceForClass(
+    id uiController =
+        ANBSharedInstance(
             @"SBUIController"
         );
 
-    if (ANBSendSelector(
-            controller,
-            @"clickedMenuButton")) {
-
-        return;
-    }
-
-    ANBSendSelector(
-        controller,
-        @"handleMenuButtonTap"
-    );
-}
-
-#pragma mark - Recent Apps
-
-static void ANBOpenSwitcher(void)
-{
-    if (!ANBIsSpringBoard()) {
-        return;
-    }
-
-    id controller =
-        ANBSharedInstanceForClass(
-            @"SBUIController"
-        );
-
-    /*
-     Một số selector khác nhau tùy iOS.
-    */
-
-    if (ANBSendSelector(
-            controller,
+    if (ANBSendVoidSelector(
+            uiController,
             @"_toggleSwitcher")) {
 
         return;
     }
 
-    if (ANBSendSelector(
-            controller,
+    if (ANBSendVoidSelector(
+            uiController,
             @"handleMenuDoubleTap")) {
 
         return;
     }
 
-    if (ANBSendSelector(
-            controller,
+    if (ANBSendVoidSelector(
+            uiController,
             @"_activateAppSwitcher")) {
 
         return;
     }
 
-    if (ANBSendSelector(
-            controller,
-            @"activateSwitcher")) {
-
-        return;
-    }
-
-    /*
-     Fallback SpringBoard.
-    */
-
-    UIApplication *springBoard =
-        UIApplication.sharedApplication;
-
-    if (ANBSendSelector(
-            springBoard,
-            @"_toggleSwitcher")) {
-
-        return;
-    }
-
-    if (ANBSendSelector(
-            springBoard,
-            @"handleMenuDoubleTap")) {
-
-        return;
-    }
-
-    ANBSendSelector(
-        springBoard,
-        @"_activateAppSwitcher"
+    ANBSendVoidSelector(
+        uiController,
+        @"activateSwitcher"
     );
 }
 
-#pragma mark - Pass Through Window
+#pragma mark - Darwin Callbacks
 
-@interface ANBPassThroughWindow :
-    UIWindow
-
-@property(nonatomic, weak)
-    UIView *navigationBar;
-
-@end
-
-@implementation ANBPassThroughWindow
-
-- (UIView *)hitTest:
-    (CGPoint)point
-    withEvent:
-    (UIEvent *)event
+static void ANBHomeNotificationReceived(
+    CFNotificationCenterRef center,
+    void *observer,
+    CFStringRef name,
+    const void *object,
+    CFDictionaryRef userInfo
+)
 {
-    if (self.hidden ||
-        self.alpha <= 0.01 ||
-        !self.userInteractionEnabled) {
-
-        return nil;
+    if (!ANBIsSpringBoard()) {
+        return;
     }
 
-    UIView *bar =
-        self.navigationBar;
-
-    if (!bar ||
-        bar.hidden ||
-        bar.alpha <= 0.01) {
-
-        return nil;
-    }
-
-    CGPoint pointInBar =
-        [bar
-            convertPoint:
-                point
-            fromView:
-                self];
-
-    /*
-     Chỉ vùng thanh 3 nút nhận cảm ứng.
-
-     Toàn bộ phần còn lại của overlay
-     xuyên cảm ứng xuống app phía dưới.
-    */
-
-    if (![bar
-            pointInside:
-                pointInBar
-            withEvent:
-                event]) {
-
-        return nil;
-    }
-
-    return [super
-        hitTest:
-            point
-        withEvent:
-            event];
+    dispatch_async(
+        dispatch_get_main_queue(),
+        ^{
+            ANBGoHome();
+        }
+    );
 }
 
-@end
-
-#pragma mark - Navigation Controller
-
-@interface ANBNavigationController :
-    UIViewController
-
-@property(nonatomic, strong)
-    UIView *barView;
-
-@property(nonatomic, strong)
-    UIButton *recentButton;
-
-@property(nonatomic, strong)
-    UIButton *homeButton;
-
-@property(nonatomic, strong)
-    UIButton *backButton;
-
-- (UIButton *)createButtonWithTitle:
-    (NSString *)title;
-
-- (void)updateLayout;
-
-@end
-
-@implementation ANBNavigationController
-
-- (void)viewDidLoad
+static void ANBRecentNotificationReceived(
+    CFNotificationCenterRef center,
+    void *observer,
+    CFStringRef name,
+    const void *object,
+    CFDictionaryRef userInfo
+)
 {
-    [super viewDidLoad];
+    if (!ANBIsSpringBoard()) {
+        return;
+    }
 
-    self.view.backgroundColor =
-        UIColor.clearColor;
+    dispatch_async(
+        dispatch_get_main_queue(),
+        ^{
+            ANBOpenRecentApps();
+        }
+    );
+}
 
-    self.view.userInteractionEnabled =
-        YES;
+#pragma mark - Android Icon Button
 
-    /*
-     Thanh nền.
-    */
+typedef NS_ENUM(NSInteger, ANBIconType) {
+    ANBIconTypeRecent = 0,
+    ANBIconTypeHome   = 1,
+    ANBIconTypeBack   = 2
+};
 
-    UIView *bar =
-        [[UIView alloc] initWithFrame:CGRectZero];
+@interface ANBIconButton : UIButton
 
-    bar.backgroundColor =
-        [UIColor.blackColor
+@property(nonatomic, assign)
+    ANBIconType iconType;
+
+@end
+
+@implementation ANBIconButton
+
+- (void)drawRect:
+    (CGRect)rect
+{
+    [super drawRect:rect];
+
+    CGContextRef context =
+        UIGraphicsGetCurrentContext();
+
+    if (!context) {
+        return;
+    }
+
+    CGFloat alpha =
+        self.highlighted
+        ? 0.40
+        : 1.00;
+
+    UIColor *color =
+        [UIColor.whiteColor
             colorWithAlphaComponent:
-                0.86];
+                alpha];
 
-    /*
-     Không dùng continuousCorners vì
-     không tồn tại trong public CALayer SDK.
-    */
-    bar.layer.cornerRadius =
-        25.0;
+    CGFloat centerX =
+        CGRectGetMidX(rect);
 
-    bar.layer.masksToBounds =
-        NO;
+    CGFloat centerY =
+        CGRectGetMidY(rect);
 
-    bar.layer.shadowColor =
-        UIColor.blackColor.CGColor;
+    CGContextSetStrokeColorWithColor(
+        context,
+        color.CGColor
+    );
 
-    bar.layer.shadowOpacity =
-        0.25;
+    CGContextSetFillColorWithColor(
+        context,
+        color.CGColor
+    );
 
-    bar.layer.shadowRadius =
-        7.0;
+    CGContextSetLineWidth(
+        context,
+        2.4
+    );
 
-    bar.layer.shadowOffset =
-        CGSizeMake(
-            0.0,
-            2.0
+    CGContextSetLineCap(
+        context,
+        kCGLineCapRound
+    );
+
+    CGContextSetLineJoin(
+        context,
+        kCGLineJoinRound
+    );
+
+    if (self.iconType ==
+        ANBIconTypeRecent) {
+
+        /*
+         □
+        */
+
+        CGRect square =
+            CGRectMake(
+                centerX - 7.5,
+                centerY - 7.5,
+                15.0,
+                15.0
+            );
+
+        CGContextStrokeRect(
+            context,
+            square
         );
 
-    self.barView =
-        bar;
+    } else if (
+        self.iconType ==
+        ANBIconTypeHome) {
 
-    [self.view
-        addSubview:
-            bar];
+        /*
+         ○
+        */
 
-    /*
-     THỨ TỰ:
+        CGRect circle =
+            CGRectMake(
+                centerX - 8.0,
+                centerY - 8.0,
+                16.0,
+                16.0
+            );
 
-     □ = Đa nhiệm  bên trái
-     ○ = Home      ở giữa
-     ◁ = Quay lại  bên phải
-    */
+        CGContextStrokeEllipseInRect(
+            context,
+            circle
+        );
 
-    self.recentButton =
-        [self
-            createButtonWithTitle:
-                @"□"];
+    } else {
 
-    self.homeButton =
-        [self
-            createButtonWithTitle:
-                @"○"];
+        /*
+         ◁
 
-    self.backButton =
-        [self
-            createButtonWithTitle:
-                @"◁"];
+         Nút Back nằm BÊN PHẢI.
+        */
 
-    /*
-     Actions.
-    */
+        CGContextBeginPath(
+            context
+        );
 
-    [self.recentButton
-        addTarget:
-            self
-        action:
-            @selector(recentPressed)
-        forControlEvents:
-            UIControlEventTouchUpInside];
+        CGContextMoveToPoint(
+            context,
+            centerX + 7.0,
+            centerY - 9.0
+        );
 
-    [self.homeButton
-        addTarget:
-            self
-        action:
-            @selector(homePressed)
-        forControlEvents:
-            UIControlEventTouchUpInside];
+        CGContextAddLineToPoint(
+            context,
+            centerX - 7.0,
+            centerY
+        );
 
-    [self.backButton
-        addTarget:
-            self
-        action:
-            @selector(backPressed)
-        forControlEvents:
-            UIControlEventTouchUpInside];
+        CGContextAddLineToPoint(
+            context,
+            centerX + 7.0,
+            centerY + 9.0
+        );
 
-    /*
-     Add buttons.
-    */
+        CGContextClosePath(
+            context
+        );
 
-    [bar
-        addSubview:
-            self.recentButton];
-
-    [bar
-        addSubview:
-            self.homeButton];
-
-    [bar
-        addSubview:
-            self.backButton];
-
-    [self updateLayout];
+        CGContextStrokePath(
+            context
+        );
+    }
 }
 
-- (UIButton *)createButtonWithTitle:
-    (NSString *)title
+- (void)setHighlighted:
+    (BOOL)highlighted
 {
-    UIButton *button =
-        [UIButton
-            buttonWithType:
-                UIButtonTypeCustom];
+    [super setHighlighted:highlighted];
 
-    [button
-        setTitle:
-            title
-        forState:
-            UIControlStateNormal];
+    [self setNeedsDisplay];
+}
 
-    [button
-        setTitleColor:
-            UIColor.whiteColor
-        forState:
-            UIControlStateNormal];
+@end
 
-    /*
-     Dùng màu state highlighted thay vì
-     adjustsImageWhenHighlighted.
+#pragma mark - Android Navigation Bar View
 
-     Không còn warning deprecated iOS 15.
-    */
-    [button
-        setTitleColor:
-            [UIColor.whiteColor
+@interface ANBBarView : UIView
+
+@property(nonatomic, strong)
+    ANBIconButton *recentButton;
+
+@property(nonatomic, strong)
+    ANBIconButton *homeButton;
+
+@property(nonatomic, strong)
+    ANBIconButton *backButton;
+
+@property(nonatomic, weak)
+    UIWindow *hostWindow;
+
+- (instancetype)initWithWindow:
+    (UIWindow *)window;
+
+- (void)updateFrame;
+
+@end
+
+@implementation ANBBarView
+
+- (instancetype)initWithWindow:
+    (UIWindow *)window
+{
+    self =
+        [super
+            initWithFrame:
+                CGRectMake(
+                    0,
+                    0,
+                    ANBBarWidth,
+                    ANBBarHeight
+                )];
+
+    if (self) {
+
+        _hostWindow = window;
+
+        self.backgroundColor =
+            [UIColor.blackColor
                 colorWithAlphaComponent:
-                    0.35]
-        forState:
-            UIControlStateHighlighted];
+                    0.82];
 
-    button.titleLabel.font =
-        [UIFont
-            systemFontOfSize:
-                28.0
-            weight:
-                UIFontWeightRegular];
+        self.layer.cornerRadius =
+            ANBBarHeight / 2.0;
 
-    button.backgroundColor =
-        UIColor.clearColor;
+        self.layer.masksToBounds =
+            YES;
+
+        /*
+         Luôn nằm trên content của app.
+        */
+        self.layer.zPosition =
+            999999.0;
+
+        self.userInteractionEnabled =
+            YES;
+
+        /*
+         □ Đa nhiệm - trái
+        */
+        _recentButton =
+            [ANBIconButton
+                buttonWithType:
+                    UIButtonTypeCustom];
+
+        _recentButton.iconType =
+            ANBIconTypeRecent;
+
+        [_recentButton
+            addTarget:self
+            action:
+                @selector(recentPressed)
+            forControlEvents:
+                UIControlEventTouchUpInside];
+
+        /*
+         ○ Home - giữa
+        */
+        _homeButton =
+            [ANBIconButton
+                buttonWithType:
+                    UIButtonTypeCustom];
+
+        _homeButton.iconType =
+            ANBIconTypeHome;
+
+        [_homeButton
+            addTarget:self
+            action:
+                @selector(homePressed)
+            forControlEvents:
+                UIControlEventTouchUpInside];
+
+        /*
+         ◁ Back - phải
+        */
+        _backButton =
+            [ANBIconButton
+                buttonWithType:
+                    UIButtonTypeCustom];
+
+        _backButton.iconType =
+            ANBIconTypeBack;
+
+        [_backButton
+            addTarget:self
+            action:
+                @selector(backPressed)
+            forControlEvents:
+                UIControlEventTouchUpInside];
+
+        [self addSubview:_recentButton];
+        [self addSubview:_homeButton];
+        [self addSubview:_backButton];
+
+        [self updateFrame];
+    }
+
+    return self;
+}
+
+- (void)layoutSubviews
+{
+    [super layoutSubviews];
+
+    CGFloat buttonWidth =
+        CGRectGetWidth(self.bounds) /
+        3.0;
+
+    CGFloat height =
+        CGRectGetHeight(self.bounds);
 
     /*
-     Tăng vùng bấm.
+     LEFT = RECENTS
     */
-    button.userInteractionEnabled =
-        YES;
+    self.recentButton.frame =
+        CGRectMake(
+            0,
+            0,
+            buttonWidth,
+            height
+        );
 
-    button.exclusiveTouch =
-        YES;
+    /*
+     CENTER = HOME
+    */
+    self.homeButton.frame =
+        CGRectMake(
+            buttonWidth,
+            0,
+            buttonWidth,
+            height
+        );
 
-    return button;
+    /*
+     RIGHT = BACK
+    */
+    self.backButton.frame =
+        CGRectMake(
+            buttonWidth * 2.0,
+            0,
+            buttonWidth,
+            height
+        );
 }
 
-- (void)viewDidAppear:
-    (BOOL)animated
+- (void)updateFrame
 {
-    [super viewDidAppear:animated];
+    UIWindow *window =
+        self.hostWindow;
 
-    [self updateLayout];
-}
+    if (!window) {
+        return;
+    }
 
-- (void)viewDidLayoutSubviews
-{
-    [super viewDidLayoutSubviews];
+    CGFloat windowWidth =
+        CGRectGetWidth(
+            window.bounds
+        );
 
-    [self updateLayout];
-}
+    CGFloat windowHeight =
+        CGRectGetHeight(
+            window.bounds
+        );
 
-- (void)updateLayout
-{
-    CGRect bounds =
-        self.view.bounds;
-
-    CGFloat screenWidth =
-        CGRectGetWidth(bounds);
-
-    CGFloat screenHeight =
-        CGRectGetHeight(bounds);
-
-    if (screenWidth <= 0.0 ||
-        screenHeight <= 0.0) {
+    if (windowWidth <= 0 ||
+        windowHeight <= 0) {
 
         return;
     }
@@ -1081,83 +1289,52 @@ static void ANBOpenSwitcher(void)
     CGFloat width =
         MIN(
             ANBBarWidth,
-            MAX(
-                120.0,
-                screenWidth - 24.0
-            )
+            windowWidth - 24.0
         );
 
-    CGFloat height =
-        ANBBarHeight;
+    CGFloat safeBottom =
+        window.safeAreaInsets.bottom;
+
+    /*
+     Đặt trên Home Indicator một chút.
+
+     iPhone 11 Pro Max thường có safeBottom > 0.
+    */
+
+    CGFloat bottom =
+        MAX(
+            ANBBottomGap,
+            safeBottom + 2.0
+        );
 
     CGFloat x =
         (
-            screenWidth -
+            windowWidth -
             width
         ) / 2.0;
 
     CGFloat y =
-        screenHeight -
-        height -
-        ANBBottomMargin;
+        windowHeight -
+        ANBBarHeight -
+        bottom;
 
-    self.barView.frame =
+    self.frame =
         CGRectMake(
             x,
             y,
             width,
-            height
+            ANBBarHeight
         );
 
-    /*
-     Giữ bo góc đúng khi rotate.
-    */
-    self.barView.layer.cornerRadius =
-        height / 2.0;
+    self.layer.cornerRadius =
+        ANBBarHeight / 2.0;
 
-    CGFloat buttonWidth =
-        width / 3.0;
-
-    /*
-     TRÁI = ĐA NHIỆM.
-    */
-
-    self.recentButton.frame =
-        CGRectMake(
-            0.0,
-            0.0,
-            buttonWidth,
-            height
-        );
-
-    /*
-     GIỮA = HOME.
-    */
-
-    self.homeButton.frame =
-        CGRectMake(
-            buttonWidth,
-            0.0,
-            buttonWidth,
-            height
-        );
-
-    /*
-     PHẢI = QUAY LẠI.
-    */
-
-    self.backButton.frame =
-        CGRectMake(
-            buttonWidth * 2.0,
-            0.0,
-            buttonWidth,
-            height
-        );
+    [self setNeedsLayout];
 }
 
 #pragma mark - Buttons
 
-- (void)backPressed
+- (void)recentPressed
 {
     UIImpactFeedbackGenerator *feedback =
         [[UIImpactFeedbackGenerator alloc]
@@ -1167,17 +1344,20 @@ static void ANBOpenSwitcher(void)
     [feedback prepare];
     [feedback impactOccurred];
 
-    /*
-     Gửi Back tới foreground app.
-    */
+    if (ANBIsSpringBoard()) {
 
-    CFNotificationCenterPostNotification(
-        CFNotificationCenterGetDarwinNotifyCenter(),
-        ANBBackNotification,
-        NULL,
-        NULL,
-        YES
-    );
+        ANBOpenRecentApps();
+
+    } else {
+
+        CFNotificationCenterPostNotification(
+            CFNotificationCenterGetDarwinNotifyCenter(),
+            ANBRecentNotification,
+            NULL,
+            NULL,
+            YES
+        );
+    }
 }
 
 - (void)homePressed
@@ -1190,10 +1370,23 @@ static void ANBOpenSwitcher(void)
     [feedback prepare];
     [feedback impactOccurred];
 
-    ANBGoHome();
+    if (ANBIsSpringBoard()) {
+
+        ANBGoHome();
+
+    } else {
+
+        CFNotificationCenterPostNotification(
+            CFNotificationCenterGetDarwinNotifyCenter(),
+            ANBHomeNotification,
+            NULL,
+            NULL,
+            YES
+        );
+    }
 }
 
-- (void)recentPressed
+- (void)backPressed
 {
     UIImpactFeedbackGenerator *feedback =
         [[UIImpactFeedbackGenerator alloc]
@@ -1203,273 +1396,159 @@ static void ANBOpenSwitcher(void)
     [feedback prepare];
     [feedback impactOccurred];
 
-    ANBOpenSwitcher();
+    /*
+     Ở Home screen, Back không làm gì.
+
+     Trong app:
+     xử lý Back ngay trong chính process của app.
+    */
+
+    if (!ANBIsSpringBoard()) {
+        ANBPerformBack();
+    }
 }
 
 @end
 
-#pragma mark - Lock State
+#pragma mark - Install Bar
 
-static BOOL ANBDeviceLocked(void)
+static void ANBLayoutBar(
+    UIWindow *window
+)
 {
-    id manager =
-        ANBSharedInstanceForClass(
-            @"SBLockScreenManager"
+    if (!window) {
+        return;
+    }
+
+    ANBBarView *bar =
+        objc_getAssociatedObject(
+            window,
+            &kANBBarKey
         );
 
-    if (!manager) {
-        return NO;
+    if (!bar) {
+        return;
     }
 
-    SEL selector =
-        NSSelectorFromString(
-            @"isUILocked"
+    [bar updateFrame];
+
+    /*
+     Đảm bảo không bị content app đè lên.
+    */
+    [window bringSubviewToFront:bar];
+}
+
+static void ANBInstallBar(
+    UIWindow *window
+)
+{
+    if (!ANBWindowAllowed(window)) {
+        return;
+    }
+
+    ANBBarView *existing =
+        objc_getAssociatedObject(
+            window,
+            &kANBBarKey
         );
 
-    if (![manager
-            respondsToSelector:
-                selector]) {
+    if (existing) {
 
-        return NO;
+        [existing updateFrame];
+
+        [window
+            bringSubviewToFront:
+                existing];
+
+        return;
     }
 
-    return
-        ((BOOL (*)(id, SEL))objc_msgSend)(
-            manager,
-            selector
-        );
+    ANBBarView *bar =
+        [[ANBBarView alloc]
+            initWithWindow:
+                window];
+
+    objc_setAssociatedObject(
+        window,
+        &kANBBarKey,
+        bar,
+        OBJC_ASSOCIATION_RETAIN_NONATOMIC
+    );
+
+    [window addSubview:bar];
+
+    [window bringSubviewToFront:bar];
+
+    [bar updateFrame];
 }
 
-#pragma mark - Overlay
-
-static void ANBCreateOverlay(void)
+static void ANBInstallOnBestWindow(void)
 {
-    if (!ANBIsSpringBoard()) {
-        return;
-    }
-
-    if (gANBOverlayWindow) {
-        return;
-    }
-
-    UIWindowScene *targetScene =
-        nil;
-
-    if (@available(iOS 13.0, *)) {
-
-        /*
-         Tìm UIWindowScene của SpringBoard.
-        */
-
-        for (UIScene *scene
-             in UIApplication
-                .sharedApplication
-                .connectedScenes) {
-
-            if (![scene
-                    isKindOfClass:
-                        [UIWindowScene class]]) {
-
-                continue;
-            }
-
-            if (scene.activationState ==
-                UISceneActivationStateForegroundActive) {
-
-                targetScene =
-                    (UIWindowScene *)scene;
-
-                break;
-            }
-        }
-
-        /*
-         Fallback.
-        */
-
-        if (!targetScene) {
-
-            for (UIScene *scene
-                 in UIApplication
-                    .sharedApplication
-                    .connectedScenes) {
-
-                if ([scene
-                        isKindOfClass:
-                            [UIWindowScene class]]) {
-
-                    targetScene =
-                        (UIWindowScene *)scene;
-
-                    break;
-                }
-            }
-        }
-    }
-
-    if (!targetScene) {
-        return;
-    }
-
-    ANBPassThroughWindow *window =
-        [[ANBPassThroughWindow alloc]
-            initWithWindowScene:
-                targetScene];
-
-    window.frame =
-        targetScene
-            .coordinateSpace
-            .bounds;
-
-    window.backgroundColor =
-        UIColor.clearColor;
-
-    /*
-     Trên app nhưng không dùng level quá cao.
-    */
-    window.windowLevel =
-        UIWindowLevelAlert +
-        8.0;
-
-    ANBNavigationController *controller =
-        [[ANBNavigationController alloc]
-            init];
-
-    window.rootViewController =
-        controller;
-
-    /*
-     QUAN TRỌNG:
-
-     Ép viewDidLoad chạy trước khi lấy barView.
-     Bản trước có khả năng controller.barView = nil
-     ở thời điểm gán navigationBar.
-    */
-
-    [controller loadViewIfNeeded];
-
-    window.navigationBar =
-        controller.barView;
-
-    gANBOverlayWindow =
-        window;
-
-    /*
-     Không dùng makeKeyAndVisible.
-     Không cướp keyWindow của SpringBoard.
-    */
-
-    if (ANBDeviceLocked()) {
-
-        window.hidden =
-            YES;
-
-    } else {
-
-        window.hidden =
-            NO;
-    }
-}
-
-static void ANBRefreshOverlay(void)
-{
-    if (!ANBIsSpringBoard()) {
-        return;
-    }
-
-    if (!gANBOverlayWindow) {
-
-        ANBCreateOverlay();
-        return;
-    }
-
-    /*
-     Ẩn trên Lock Screen.
-    */
-
-    if (ANBDeviceLocked()) {
-
-        gANBOverlayWindow.hidden =
-            YES;
-
-        return;
-    }
-
-    gANBOverlayWindow.hidden =
-        NO;
-
-    /*
-     Cập nhật frame khi xoay màn hình.
-    */
-
-    if (@available(iOS 13.0, *)) {
-
-        UIWindowScene *scene =
-            gANBOverlayWindow.windowScene;
-
-        if (scene) {
-
-            gANBOverlayWindow.frame =
-                scene.coordinateSpace.bounds;
-        }
-    }
-
-    ANBNavigationController *controller =
-        (ANBNavigationController *)
-            gANBOverlayWindow
-                .rootViewController;
-
-    [controller.view
-        setNeedsLayout];
-
-    [controller.view
-        layoutIfNeeded];
-
-    /*
-     Đảm bảo hitTest vẫn nhận đúng bar.
-    */
-
-    if ([gANBOverlayWindow
-            isKindOfClass:
-                [ANBPassThroughWindow class]]) {
-
-        ANBPassThroughWindow *window =
-            (ANBPassThroughWindow *)
-                gANBOverlayWindow;
-
-        window.navigationBar =
-            controller.barView;
-    }
-}
-
-#pragma mark - SpringBoard Hooks
-
-%group SpringBoardHooks
-
-%hook SpringBoard
-
-- (void)applicationDidFinishLaunching:
-    (id)application
-{
-    %orig(application);
-
-    /*
-     Đợi SpringBoard dựng UI xong mới tạo overlay.
-    */
-
-    dispatch_after(
-        dispatch_time(
-            DISPATCH_TIME_NOW,
-            (int64_t)(
-                1.0 *
-                NSEC_PER_SEC
-            )
-        ),
+    dispatch_async(
         dispatch_get_main_queue(),
         ^{
 
-            ANBCreateOverlay();
-            ANBRefreshOverlay();
+            UIWindow *window =
+                ANBBestWindow();
+
+            if (!window) {
+                return;
+            }
+
+            ANBInstallBar(window);
+
+        }
+    );
+}
+
+#pragma mark - UIKit Hooks
+
+%group ANBWindowHooks
+
+%hook UIWindow
+
+- (void)makeKeyAndVisible
+{
+    %orig;
+
+    dispatch_async(
+        dispatch_get_main_queue(),
+        ^{
+
+            ANBInstallBar(self);
+
+        }
+    );
+}
+
+- (void)setHidden:
+    (BOOL)hidden
+{
+    %orig(hidden);
+
+    if (!hidden) {
+
+        dispatch_async(
+            dispatch_get_main_queue(),
+            ^{
+
+                ANBInstallBar(self);
+
+            }
+        );
+    }
+}
+
+- (void)setRootViewController:
+    (UIViewController *)controller
+{
+    %orig(controller);
+
+    dispatch_async(
+        dispatch_get_main_queue(),
+        ^{
+
+            ANBInstallBar(self);
 
         }
     );
@@ -1485,72 +1564,141 @@ static void ANBRefreshOverlay(void)
 {
     @autoreleasepool {
 
+        /*
+         Hook cửa sổ ở cả app và SpringBoard.
+
+         Khác bản trước:
+         KHÔNG tạo UIWindow riêng nữa.
+        */
+
+        %init(ANBWindowHooks);
+
         if (ANBIsSpringBoard()) {
 
-            %init(SpringBoardHooks);
-
             /*
-             Refresh khi SpringBoard active lại.
+             SpringBoard chỉ cần nghe lệnh
+             Home + Recent từ các app.
             */
 
-            [[NSNotificationCenter
-                defaultCenter]
-                addObserverForName:
-                    UIApplicationDidBecomeActiveNotification
-                object:nil
-                queue:
-                    NSOperationQueue.mainQueue
-                usingBlock:
-                    ^(NSNotification *note) {
+            CFNotificationCenterAddObserver(
+                CFNotificationCenterGetDarwinNotifyCenter(),
+                NULL,
+                ANBHomeNotificationReceived,
+                ANBHomeNotification,
+                NULL,
+                CFNotificationSuspensionBehaviorDeliverImmediately
+            );
 
-                        ANBRefreshOverlay();
-
-                    }];
-
-            /*
-             Refresh khi rotate.
-            */
-
-            [[NSNotificationCenter
-                defaultCenter]
-                addObserverForName:
-                    UIDeviceOrientationDidChangeNotification
-                object:nil
-                queue:
-                    NSOperationQueue.mainQueue
-                usingBlock:
-                    ^(NSNotification *note) {
-
-                        dispatch_async(
-                            dispatch_get_main_queue(),
-                            ^{
-
-                                ANBRefreshOverlay();
-
-                            }
-                        );
-                    }];
-
-            [[UIDevice currentDevice]
-                beginGeneratingDeviceOrientationNotifications];
-
-            return;
+            CFNotificationCenterAddObserver(
+                CFNotificationCenterGetDarwinNotifyCenter(),
+                NULL,
+                ANBRecentNotificationReceived,
+                ANBRecentNotification,
+                NULL,
+                CFNotificationSuspensionBehaviorDeliverImmediately
+            );
         }
 
         /*
-         Các app bình thường KHÔNG tạo overlay.
-
-         Chỉ nghe thông báo Back do
-         nút bên SpringBoard gửi tới.
+         Khi app active:
+         tìm lại window và gắn bar.
         */
 
-        CFNotificationCenterAddObserver(
-            CFNotificationCenterGetDarwinNotifyCenter(),
-            NULL,
-            ANBBackNotificationReceived,
-            ANBBackNotification,
-            NULL,
-            CFNotificationSuspensionBehaviorDeliverImmediately
+        [[NSNotificationCenter defaultCenter]
+            addObserverForName:
+                UIApplicationDidBecomeActiveNotification
+            object:nil
+            queue:NSOperationQueue.mainQueue
+            usingBlock:
+                ^(NSNotification *note) {
+
+                    ANBInstallOnBestWindow();
+
+                }];
+
+        /*
+         Xoay màn hình:
+         cập nhật vị trí.
+        */
+
+        [[NSNotificationCenter defaultCenter]
+            addObserverForName:
+                UIDeviceOrientationDidChangeNotification
+            object:nil
+            queue:NSOperationQueue.mainQueue
+            usingBlock:
+                ^(NSNotification *note) {
+
+                    dispatch_after(
+                        dispatch_time(
+                            DISPATCH_TIME_NOW,
+                            (int64_t)(
+                                0.10 *
+                                NSEC_PER_SEC
+                            )
+                        ),
+                        dispatch_get_main_queue(),
+                        ^{
+
+                            UIWindow *window =
+                                ANBBestWindow();
+
+                            if (window) {
+
+                                ANBInstallBar(
+                                    window
+                                );
+
+                                ANBLayoutBar(
+                                    window
+                                );
+                            }
+
+                        }
+                    );
+
+                }];
+
+        [[UIDevice currentDevice]
+            beginGeneratingDeviceOrientationNotifications];
+
+        /*
+         Không phụ thuộc applicationDidFinishLaunching nữa.
+
+         Dù tweak load muộn,
+         0.3 giây sau vẫn chủ động tìm cửa sổ.
+        */
+
+        dispatch_after(
+            dispatch_time(
+                DISPATCH_TIME_NOW,
+                (int64_t)(
+                    0.30 *
+                    NSEC_PER_SEC
+                )
+            ),
+            dispatch_get_main_queue(),
+            ^{
+
+                ANBInstallOnBestWindow();
+
+            }
+        );
+
+        dispatch_after(
+            dispatch_time(
+                DISPATCH_TIME_NOW,
+                (int64_t)(
+                    1.00 *
+                    NSEC_PER_SEC
+                )
+            ),
+            dispatch_get_main_queue(),
+            ^{
+
+                ANBInstallOnBestWindow();
+
+            }
         );
     }
 }
